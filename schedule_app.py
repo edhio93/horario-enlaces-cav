@@ -4,6 +4,45 @@
 #     streamlit run schedule_app.py
 # Requiere Streamlit ≥ 1.29
 # ---------------------------------------------------------------------------
+ import streamlit as st
+
+# ————— Autenticación con roles —————
+if 'logged' not in st.session_state:
+     st.session_state.logged = False
+
+ if not st.session_state.logged:
+     st.title('🔒 Iniciar sesión')
+     user_input = st.text_input('Usuario')
+     pwd_input  = st.text_input('Contraseña', type='password')
+     if st.button('Entrar'):
+         creds = st.secrets['credentials']
+         match = None
+         for key, info in creds.items():
+             if info['username'] == user_input:
+                 match = info
+                 break
+         if match and pwd_input == match['password']:
+             st.session_state.logged = True
+             st.session_state.user   = match['username']
+             st.session_state.role   = match['role']
+             st.experimental_rerun()
+         else:
+             st.error('Usuario o contraseña inválida')
+
+     st.stop()
+# ——————————————————————————————
+
+ # Sidebar con usuario y logout
+
+ st.sidebar.markdown(f"**Usuario:** {st.session_state.user}")
+
+ if st.sidebar.button('Cerrar sesión'):
+     for key in ['logged','user','role']:
+
+         st.session_state.pop(key, None)
+     st.experimental_rerun()
+
+
 """
 Aplicación Streamlit para gestionar reservas de salas de enlaces y recursos
 tecnológicos del Colegio Antonio Varas (2° semestre 2025).
@@ -172,14 +211,16 @@ div[role='tablist'] > button[role='tab'] {{ color:#000!important; }}
 st.markdown(f"<style>{CSS}</style>", unsafe_allow_html=True)
 st.markdown(f"<h1 style='text-align:center;color:{BURGUNDY};'>📅 HORARIO ENLACES CAV 💻</h1>", unsafe_allow_html=True)
 
-# Pestañas
-# Agregar pestaña de Mantenimientos
-tab_reg, tab_db, tab_week, tab_maint = st.tabs([
-    "▶ Registrar",
-    "📂 Base datos",
-    "📅 Semana",
-    "🔧 Mantenimiento"
-])
+ # pestañas fijas
+ tabs = st.tabs(["▶ Registrar","📂 Base datos","📅 Semana","🔧 Mantenimiento"])
+ # pestañas según rol
+ role = st.session_state.role
+ if role == 'admin':
+     tab_labels = ['▶ Registrar','📂 Base datos','📅 Semana','🔧 Mantenimiento']
+ else:
+     tab_labels = ['▶ Registrar']
+
+ tabs = st.tabs(tab_labels)
 
 # Función toast
 def toast(msg: str, kind: str = "info") -> None:
@@ -189,8 +230,8 @@ def toast(msg: str, kind: str = "info") -> None:
     except Exception:
         getattr(st, kind)(msg)
 
-# ▶ Registrar
-with tab_reg:
+# ▶ Registrar (siempre accesible)
+ with tabs[0]:
     st.markdown("<h2 style='color:#000;'>▶ Registrar nueva reserva</h2>", unsafe_allow_html=True)
     # Actualizar listas dinámicas
     PROFESORES, CURSOS, RECURSOS = recalc_lists(df)
@@ -326,8 +367,9 @@ def build_ics(df_events: pd.DataFrame, prof: str) -> str:
         ]
     lines.append("END:VCALENDAR")
     return "\n".join(lines)
-# 📂 Base datos
-with tab_db:
+# 📂 Base datos (solo admin)
+ if role == 'admin':
+     with tabs[1]:
     st.markdown("<h2 style='color:#000;'>📂 Base datos de reservas</h2>", unsafe_allow_html=True)
     # Copia de datos para edición
     editor = df.copy()
@@ -393,8 +435,9 @@ with tab_db:
             atomic_save(new_df)
             toast("Registros eliminados.", "success")
 
-# 📅 Semana
-with tab_week:
+# 📅 Semana (solo admin)
+ if role == 'admin':
+     with tabs[2]:
     st.markdown("<h2 style='color:#000;'>📅 Vista semanal</h2>", unsafe_allow_html=True)
     # Selecciona cualquier fecha de la semana (cualquier día)
     fecha_ref = st.date_input(
@@ -450,8 +493,9 @@ with tab_week:
     html = styled.to_html()
     st.markdown(html, unsafe_allow_html=True)
 
-# 🔧 Mantenimiento
-with tab_maint:
+# 🔧 Mantenimiento (solo admin)
+ if role == 'admin':
+     with tabs[3]:
     st.markdown("<h2 style='color:#000;'>🔧 Gestión de Mantenimiento</h2>", unsafe_allow_html=True)
     def_tab = "Mantenimientos"
     # Cargar o inicializar dataframe de mantenimientos
