@@ -501,6 +501,20 @@ elif page == '📂 Base datos' and role == 'admin':
         "<h2 style='color:#000;font-size:1.5rem; text-align:center'>📂 Base datos de reservas</h2>",
         unsafe_allow_html=True
     )
+import datetime
+
+def safe_parse_date(val):
+    # Si ya es un date o timestamp, lo devolvemos convertido a date
+    if isinstance(val, datetime.date):
+        return val
+    # Si viene como Timestamp de pandas
+    if hasattr(val, "to_pydatetime"):
+        return val.to_pydatetime().date()
+    # En otro caso, lo parseamos con tu función que ya tenías
+    return parse_date(val)
+
+# Aplico el parseo seguro a toda la columna Fecha
+editor['Fecha'] = editor['Fecha'].apply(safe_parse_date)
 
     # 1) Prepara el DataFrame y la configuración de columnas
     editor = df.copy()
