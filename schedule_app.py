@@ -503,21 +503,28 @@ elif page == '📂 Base datos' and role == 'admin':
     )
 
     import datetime
+    from datetime import date, datetime as dt_datetime
 
-    # Función de parseo seguro (defínela aquí o, mejor, al inicio de tu script)
+    # Función de parseo seguro para convertir cualquier val a date
     def safe_parse_date(val):
-        if isinstance(val, datetime.date):
+        # Si ya es un date puro (no datetime)
+        if isinstance(val, date) and not isinstance(val, dt_datetime):
             return val
+        # Si es datetime de Python o pandas.Timestamp
+        if isinstance(val, dt_datetime):
+            return val.date()
         if hasattr(val, "to_pydatetime"):
             return val.to_pydatetime().date()
+        # Si es string, reutiliza tu parse_date original
         return parse_date(val)
 
-    # 1) Prepara el DataFrame y la configuración de columnas
+    # 1) Prepara el DataFrame y aplica el parseo seguro
     editor = df.copy()
     editor['Fecha'] = editor['Fecha'].apply(safe_parse_date)
     editor['Hora inicio'] = editor['Hora inicio'].apply(as_time)
     editor['Hora fin']    = editor['Hora fin'].apply(as_time)
 
+    # Configuración de columnas para el data_editor
     cfg = {
         'Fecha':         st.column_config.DateColumn('Fecha', format='DD/MM/YYYY'),
         'Hora inicio':   st.column_config.TimeColumn('Hora inicio', format='HH:mm'),
@@ -528,7 +535,7 @@ elif page == '📂 Base datos' and role == 'admin':
         'Observaciones': st.column_config.TextColumn('Observaciones'),
     }
 
-    # 2) Editor de datos a todo ancho
+    # 2) Muestra el editor de datos
     edited = st.data_editor(
         editor,
         hide_index=False,
@@ -539,7 +546,7 @@ elif page == '📂 Base datos' and role == 'admin':
 
     st.markdown("---")
 
-    # 3) Primera fila: Guardar cambios y Eliminar registros
+    # 3) Botones de acción: Guardar cambios / Eliminar registros
     action_col1, action_col2 = st.columns(2, gap="large")
     with action_col1:
         if st.button('💾 Guardar cambios', key='save_db_edits', use_container_width=True):
@@ -558,7 +565,7 @@ elif page == '📂 Base datos' and role == 'admin':
 
     st.markdown("---")
 
-    # 4) Segunda fila: Informe Excel y Descargar calendario
+    # 4) Exportaciones: Informe Excel & Calendario .ics
     export_col1, export_col2 = st.columns(2, gap="large")
     with export_col1:
         rpt = build_report(df)
@@ -571,7 +578,7 @@ elif page == '📂 Base datos' and role == 'admin':
         )
     with export_col2:
         prof_cal = st.selectbox('Seleccionar profesor (.ics)', PROFESORES, key='export_cal')
-        ics_data = build_ics(df[df['Profesor']==prof_cal], prof_cal)
+        ics_data = build_ics(df[df['Profesor'] == prof_cal], prof_cal)
         st.download_button(
             label='📅 Descargar calendario',
             data=ics_data,
