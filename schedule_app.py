@@ -505,26 +505,27 @@ elif page == '📂 Base datos' and role == 'admin':
     import datetime
     from datetime import date, datetime as dt_datetime
 
-    # Función de parseo seguro para convertir cualquier val a date
+    # Función de parseo seguro: maneja date, datetime, pandas.Timestamp y cadenas
     def safe_parse_date(val):
-        # Si ya es un date puro (no datetime)
+        # Ya es un date puro
         if isinstance(val, date) and not isinstance(val, dt_datetime):
             return val
-        # Si es datetime de Python o pandas.Timestamp
+        # Es un datetime de Python
         if isinstance(val, dt_datetime):
             return val.date()
+        # Es un pandas.Timestamp
         if hasattr(val, "to_pydatetime"):
             return val.to_pydatetime().date()
-        # Si es string, reutiliza tu parse_date original
+        # Cualquier otro caso (string), recurro a parse_date
         return parse_date(val)
 
-    # 1) Prepara el DataFrame y aplica el parseo seguro
+    # 1) Prepara el DataFrame y aplica parseo seguro a la columna Fecha
     editor = df.copy()
-    editor['Fecha'] = editor['Fecha'].apply(safe_parse_date)
+    editor['Fecha']       = editor['Fecha'].apply(safe_parse_date)
     editor['Hora inicio'] = editor['Hora inicio'].apply(as_time)
     editor['Hora fin']    = editor['Hora fin'].apply(as_time)
 
-    # Configuración de columnas para el data_editor
+    # 2) Configuración de columnas para el data_editor
     cfg = {
         'Fecha':         st.column_config.DateColumn('Fecha', format='DD/MM/YYYY'),
         'Hora inicio':   st.column_config.TimeColumn('Hora inicio', format='HH:mm'),
@@ -535,7 +536,7 @@ elif page == '📂 Base datos' and role == 'admin':
         'Observaciones': st.column_config.TextColumn('Observaciones'),
     }
 
-    # 2) Muestra el editor de datos
+    # 3) Muestra el editor de datos
     edited = st.data_editor(
         editor,
         hide_index=False,
@@ -546,7 +547,7 @@ elif page == '📂 Base datos' and role == 'admin':
 
     st.markdown("---")
 
-    # 3) Botones de acción: Guardar cambios / Eliminar registros
+    # 4) Botones de acción: Guardar cambios y Eliminar registros
     action_col1, action_col2 = st.columns(2, gap="large")
     with action_col1:
         if st.button('💾 Guardar cambios', key='save_db_edits', use_container_width=True):
@@ -565,13 +566,13 @@ elif page == '📂 Base datos' and role == 'admin':
 
     st.markdown("---")
 
-    # 4) Exportaciones: Informe Excel & Calendario .ics
+    # 5) Exportaciones: Informe Excel y Calendario .ics
     export_col1, export_col2 = st.columns(2, gap="large")
     with export_col1:
         rpt = build_report(df)
         st.download_button(
-            label='📥 Informe Excel',
-            data=rpt,
+            '📥 Informe Excel',
+            rpt,
             file_name='informe_reservas.xlsx',
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             use_container_width=True
@@ -580,8 +581,8 @@ elif page == '📂 Base datos' and role == 'admin':
         prof_cal = st.selectbox('Seleccionar profesor (.ics)', PROFESORES, key='export_cal')
         ics_data = build_ics(df[df['Profesor'] == prof_cal], prof_cal)
         st.download_button(
-            label='📅 Descargar calendario',
-            data=ics_data,
+            '📅 Descargar calendario',
+            ics_data,
             file_name=f'{prof_cal}_reservas.ics',
             mime='text/calendar',
             use_container_width=True
