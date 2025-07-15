@@ -7,6 +7,35 @@ import streamlit as st
 from openpyxl import load_workbook
 import xlsxwriter  # type: ignore
 
+# ──────────────────────────────────────────────────────────────────────────────
+# 0) DEFINICIÓN CORREGIDA DE parse_date (al inicio del script)
+# ──────────────────────────────────────────────────────────────────────────────
+import pandas as pd
+from datetime import date, datetime as dt_datetime
+
+def parse_date(val):
+    """
+    Convierte val (date, datetime, pandas.Timestamp o str) a date.
+    """
+    # Si ya es un date puro (no datetime), lo devolvemos
+    if isinstance(val, date) and not isinstance(val, dt_datetime):
+        return val
+    # Si es un datetime.datetime de Python
+    if isinstance(val, dt_datetime):
+        return val.date()
+    # Si es un pandas.Timestamp
+    if isinstance(val, pd.Timestamp):
+        return val.to_pydatetime().date()
+    # Si es string, probamos formatos
+    s = str(val).strip()
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return dt_datetime.strptime(s, fmt).date()
+        except Exception:
+            continue
+    # Si no encaja, error claro
+    raise ValueError(f"Formato de fecha inválido: {val!r}")
+
 # ------------------------------------------------------------------
 # ————— Autenticación con roles —————
 if "logged" not in st.session_state:
@@ -37,7 +66,8 @@ if not st.session_state.logged:
 # ------------------------------------------------------------------
 # 2) Configuración global y helpers
 # ------------------------------------------------------------------
-EXCEL    = 'Recursos.xlsx'
+BASE_DIR = Path(__file__).parent
+EXCEL   = BASE_DIR / "Recursos.xlsx"
 SHEET    = 'Reservas'
 DATE_FMT = '%d/%m/%Y'
 BURGUNDY = '#800000'
@@ -50,34 +80,6 @@ BLOQUES  = [
     (dt.time(16, 30), dt.time(18, 30)),
 ]
 
-from datetime import date, datetime
-
-def parse_date(val):
-    # si ya es date (pero no datetime), lo devolvemos
-    if isinstance(val, date) and not isinstance(val, datetime):
-        return val
-    # si es datetime o pandas.Timestamp, devolvemos sólo la fecha
-    if isinstance(val, datetime):
-        return val.date()
-
-    # si viene como string...
-    if isinstance(val, str):
-        s = val.strip()
-        if s == "":
-            return None
-        # añadir aquí el nuevo patrón:
-        allowed_str_formats = [
-            "%d/%m/%Y",
-            "%Y-%m-%d",
-            "%Y-%m-%d %H:%M:%S",  # <-- lo incorporamos
-        ]
-        for fmt in allowed_str_formats:
-            try:
-                return datetime.strptime(s, fmt).date()
-            except ValueError:
-                continue
-
-    raise ValueError(f"Formato de fecha inválido: {val!r}")
 
 def as_time(val):
     if isinstance(val, dt.time):
@@ -92,30 +94,102 @@ def as_time(val):
 def overlap(hi1, hf1, hi2, hf2):
     return max(hi1, hi2) < min(hf1, hf2)
 
+from pathlib import Path
+import pandas as pd
+
 # ------------------------------------------------------------------
 # 3) Recarga de datos inicial y listas dinámicas
 # ------------------------------------------------------------------
-# Inicializar Excel si no existe
-df = None
+from pathlib import Path
+import zipfile
+from openpyxl import Workbook, load_workbook
+
+# Nombre de tu fichero y de la hoja
+EXCEL = "Recursos.xlsx"
+SHEET = "Reservas"
+
+# Las columnas esperadas en tu base de datos
+DB_COLS = [
+    "Fecha", "Hora inicio", "Hora fin",
+    "Profesor", "Curso", "Recurso", "Observaciones"
+]
+
+# Asegúrate de que EXCEL termina en .xlsx
+if not EXCEL.lower().endswith('.xlsx'):
+    raise ValueError(f"El fichero de base de datos debe ser .xlsx, no {EXCEL!r}")
+
+def init_empty_db(path: str, sheet_name: str):
+    """
+    Crea el .xlsx y escribe en la hoja sheet_name
+    la primera fila con los encabezados DB_COLS.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    # Escribir encabezados
+    for col_idx, header in enumerate(DB_COLS, start=1):
+        ws.cell(row=1, column=col_idx, value=header)
+    wb.save(path)
+
+# Si no existe el fichero, créalo con los encabezados
 if not Path(EXCEL).exists():
-    cols = ['Fecha', 'Hora inicio', 'Hora fin', 'Profesor', 'Curso', 'Recurso', 'Observaciones']
-    pd.DataFrame(columns=cols).to_excel(EXCEL, sheet_name=SHEET, index=False)
-# Cargar datos
-xl = pd.ExcelFile(EXCEL)
-df = pd.read_excel(xl, sheet_name=SHEET, dtype=str).fillna('')
+    init_empty_db(EXCEL, SHEET)
+else:
+    # Si abre mal o falta la hoja, reemplázalo
+    try:
+        with zipfile.ZipFile(EXCEL, 'r'):
+            pass
+        wb = load_workbook(EXCEL)
+        if SHEET not in wb.sheetnames:
+            init_empty_db(EXCEL, SHEET)
+    except (zipfile.BadZipFile, KeyError):
+        init_empty_db(EXCEL, SHEET)
 
-def recalc_lists(df: pd.DataFrame):
-    get_col = lambda s: (
-        xl.parse(s).iloc[:, 0].dropna().astype(str).str.strip().tolist()
-        if s in xl.sheet_names else []
-    )
-    profs  = sorted(set(get_col('Profesores')) | set(df['Profesor'].unique()))
-    cursos = sorted(set(get_col('Cursos'))    | set(df['Curso'].unique()))
-    recs   = sorted(set(get_col('Recursos'))  |
-                    set(df['Recurso'].str.split(', ').explode().dropna().unique()))
-    return profs, cursos, recs
+# Carga segura de datos
+df = pd.read_excel(EXCEL, sheet_name=SHEET, dtype=str).fillna('')
 
-PROFESORES, CURSOS, RECURSOS = recalc_lists(df)
+# Listas dinámicas
+def recalc_lists(df: pd.DataFrame) -> tuple[list,str,list[str]]:
+    """
+    Recalcula las listas de Profesores, Cursos y Recursos
+    a partir de las hojas correspondientes en el archivo EXCEL
+    y de lo que ya hay en df.
+    """
+    # Cargamos el libro y sus nombres de hoja
+    xls = pd.ExcelFile(EXCEL)
+    sheets = xls.sheet_names
+
+    # — Profesores —
+    if 'Profesores' in sheets:
+        prof_df = pd.read_excel(EXCEL, sheet_name='Profesores').fillna('')
+        profs = prof_df.iloc[:, 0].astype(str).tolist()
+    else:
+        profs = []
+    # Añadimos los que ya existen en df
+    profs = sorted(set(profs) | set(df['Profesor'].dropna().astype(str).unique()))
+
+    # — Cursos —
+    if 'Cursos' in sheets:
+        cursos_df = pd.read_excel(EXCEL, sheet_name='Cursos').fillna('')
+        cursos = cursos_df.iloc[:, 0].astype(str).tolist()
+    else:
+        cursos = []
+    cursos = sorted(set(cursos) | set(df['Curso'].dropna().astype(str).unique()))
+
+    # — Recursos —
+    if 'Recursos' in sheets:
+        recs_df = pd.read_excel(EXCEL, sheet_name='Recursos').fillna('')
+        recs = recs_df.iloc[:, 0].astype(str).tolist()
+    else:
+        recs = []
+    # También incluimos los recursos ya usados en df (cadena "a, b, c")
+    usados = []
+    for cell in df['Recurso'].dropna().astype(str):
+        usados.extend([r.strip() for r in cell.split(',')])
+    recursos = sorted(set(recs) | set(usados))
+
+    return profs, cursos, recursos
+
 
 # ------------------------------------------------------------------
 # 4) Funciones de guardado e informes
@@ -136,7 +210,12 @@ def atomic_save(df_save: pd.DataFrame) -> None:
             break
         except PermissionError:
             time.sleep(0.2)
-            pass
+    else:
+        toast(
+            "❌ No se pudo guardar el archivo. "
+            "Cierra cualquier otra aplicación que lo tenga abierto.",
+            "error"
+        )
 
 def build_report(df_report: pd.DataFrame) -> bytes:
     buf = BytesIO()
@@ -312,12 +391,6 @@ if st.sidebar.button("🚪  Cerrar sesión", use_container_width=True):
     for k in ["logged","user","role"]:
         st.session_state.pop(k, None)
     st.rerun()
-
-
-
-
-
-
 # ————————————————————————————————————————————————
 
 # ------------------------------------------------------------------
@@ -336,7 +409,7 @@ if page == '▶ Registrar':
         hoy   = dt.date.today()
         lunes = hoy - dt.timedelta(days=hoy.weekday())
         dias  = [lunes + dt.timedelta(days=i) for i in range(5)]
-        nombres = ["Lunes","Martes","Miércoles","Jueves","Viernes"]
+        nombres = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"]
         dur     = 4
 
         slides = []
@@ -344,7 +417,7 @@ if page == '▶ Registrar':
             title = f"{nombres[i]} {d.strftime('%d/%m')}"
             sel   = df[df["Fecha"].apply(parse_date) == d]
             body  = (
-                sel[["Hora inicio","Hora fin","Profesor","Curso","Recurso"]]
+                sel[["Hora inicio", "Hora fin", "Profesor", "Curso", "Recurso"]]
                 .to_html(index=False)
                 if not sel.empty else
                 "<p>Sin reservas</p>"
@@ -375,7 +448,22 @@ if page == '▶ Registrar':
         hoy       = dt.date.today()
         total     = len(df)
         hoy_count = (df["Fecha"].apply(parse_date) == hoy).sum()
-        proxima   = df[df["Fecha"].apply(parse_date) >= hoy].iloc[0] if total else None
+
+        # filtramos reservas de hoy o futuras
+        future = df[df["Fecha"].apply(parse_date) >= hoy].copy()
+        if not future.empty:
+            # parseamos fecha y hora a objetos
+            future["Fecha_dt"] = future["Fecha"].apply(parse_date)
+            future["Hora_dt"]  = future["Hora inicio"].apply(as_time)
+            # ordenamos por fecha+hora
+            future = future.sort_values(["Fecha_dt", "Hora_dt"])
+            fila = future.iloc[0]
+            # formateamos correctamente
+            fecha_str = fila["Fecha_dt"].strftime(DATE_FMT)
+            hora_str  = fila["Hora_dt"].strftime("%H:%M")
+            valor = f"{fecha_str} {hora_str}"
+        else:
+            valor = None
 
         st.markdown(
             f"<p style='font-size:1.3rem;margin:0'>{total}</p>"
@@ -387,73 +475,79 @@ if page == '▶ Registrar':
             "<p style='font-size:0.8rem;color:gray;margin:0;'>📅 Reservas hoy</p>",
             unsafe_allow_html=True
         )
-        valor = f"{proxima['Fecha']} {proxima['Hora inicio']}" if proxima is not None else "–"
         st.markdown(
-            f"<p style='font-size:1.1rem;margin:0'>{valor}</p>"
+            f"<p style='font-size:1.1rem;margin:0'>{valor if valor else '–'}</p>"
             "<p style='font-size:0.8rem;color:gray;margin:0;'>⏰ Próxima reserva</p>",
             unsafe_allow_html=True
         )
 
-    # — Formulario registrar —
+    # — Formulario registrar —  
     PROFESORES, CURSOS, RECURSOS = recalc_lists(df)
-    def course_key(c: str) -> tuple[int,str]:
+
+    def course_key(c: str) -> tuple[int, str]:
         cu = c.upper()
-        if 'BÁSIC' in cu: return (0,cu)
-        if 'MEDIO' in cu: return (1,cu)
-        if 'DIF'   in cu: return (2,cu)
-        return (3,cu)
+        if 'BÁSIC' in cu: return (0, cu)
+        if 'MEDIO' in cu: return (1, cu)
+        if 'DIF'   in cu: return (2, cu)
+        return (3, cu)
+
     CURSOS = sorted(CURSOS, key=course_key)
 
-    c1, c2 = st.columns(2, gap="small")
-    with c1:
-        fecha       = st.date_input('Fecha inicial', dt.date.today(), format='DD/MM/YYYY')
-        recurrente  = st.checkbox("🔁 Hacer esta reserva recurrente")
-        if recurrente:
-            freq = st.selectbox("Frecuencia", ["Semanal","Diaria"])
-            if freq == "Semanal":
-                dias_sem = st.multiselect(
-                    "Días de la semana",
-                    nombres,
-                    default=[nombres[fecha.weekday()]]
+    with st.form('reserva_form'):
+        c1, c2 = st.columns(2, gap="small")
+        with c1:
+            fecha      = st.date_input('Fecha inicial', dt.date.today(), format='DD/MM/YYYY')
+            recurrente = st.checkbox("🔁 Hacer esta reserva recurrente")
+            if recurrente:
+                freq = st.selectbox("Frecuencia", ["Semanal", "Diaria"])
+                if freq == "Semanal":
+                    dias_sem = st.multiselect(
+                        "Días de la semana",
+                        nombres,
+                        default=[nombres[fecha.weekday()]]
+                    )
+                fecha_fin = st.date_input(
+                    "Repetir hasta",
+                    fecha + dt.timedelta(weeks=4),
+                    help="Fecha límite de la recurrencia"
                 )
-            fecha_fin = st.date_input(
-                "Repetir hasta",
-                fecha + dt.timedelta(weeks=4),
-                help="Fecha límite de la recurrencia"
-            )
-        hi = st.time_input('Hora inicio', BLOQUES[0][0])
-        hf = st.time_input('Hora fin',    BLOQUES[0][1])
+            hi = st.time_input('Hora inicio', BLOQUES[0][0])
+            hf = st.time_input('Hora fin',    BLOQUES[0][1])
 
-    with c2:
-        prof   = st.selectbox('Profesor', PROFESORES)
-        curso  = st.selectbox('Curso',    CURSOS)
-        # bloqueo por mantenimiento igual que antes
-        unavail = []
-        if 'Mantenimientos' in xl.sheet_names:
-            mant = xl.parse('Mantenimientos').fillna('')
-            c0   = next((c for c in mant.columns if 'fecha' in c.lower() and 'inicio' in c.lower()), None)
-            c1_  = next((c for c in mant.columns if 'fecha' in c.lower() and 'fin'    in c.lower()), None)
-            if c0 and c1_:
-                mant['Inicio'] = mant[c0].apply(parse_date)
-                mant['Fin']    = mant[c1_].apply(parse_date)
-                unavail = mant[
-                    (mant['Inicio'] <= fecha) & (mant['Fin'] >= fecha)
-                ]['Recurso'].astype(str).tolist()
-        if unavail:
-            st.warning(f"⚠️ Recursos en mantenimiento: {', '.join(unavail)}")
-        available = [r for r in RECURSOS if r not in unavail]
-        recs      = st.multiselect('Recursos', available)
+        with c2:
+            prof   = st.selectbox('Profesor', PROFESORES)
+            curso  = st.selectbox('Curso',    CURSOS)
 
-    obs = st.text_area('Observaciones', height=68)
+            # comprobación de mantenimientos
+            unavail = []
+            df_mant = pd.read_excel(EXCEL, sheet_name='Mantenimientos').fillna('')
+            if not df_mant.empty:
+                c0  = next((col for col in df_mant.columns if 'inicio' in col.lower()), None)
+                c1_ = next((col for col in df_mant.columns if 'fin'    in col.lower()), None)
+                if c0 and c1_:
+                    df_mant['Inicio'] = df_mant[c0].apply(parse_date)
+                    df_mant['Fin']    = df_mant[c1_].apply(parse_date)
+                    unavail = df_mant[
+                        (df_mant['Inicio'] <= fecha) & (df_mant['Fin'] >= fecha)
+                    ]['Recurso'].astype(str).tolist()
+            if unavail:
+                st.warning(f"⚠️ Recursos en mantenimiento: {', '.join(unavail)}")
+            available = [r for r in RECURSOS if r not in unavail]
+            recs      = st.multiselect('Recursos', available)
 
-    if st.button('💾 Guardar reserva'):
-        # — Validaciones básicas —
+        obs       = st.text_area('Observaciones', height=68)
+        submitted = st.form_submit_button('💾 Guardar reserva')
+
+    if submitted:
+        # — Validaciones —
         if hi >= hf:
-            toast('Hora inicio debe ser antes de fin.', 'warning'); st.stop()
+            toast('Hora inicio debe ser antes de fin.', 'warning')
+            st.stop()
         if not recs:
-            toast('Selecciona al menos un recurso.', 'warning'); st.stop()
+            toast('Selecciona al menos un recurso.', 'warning')
+            st.stop()
 
-        # — Generamos la lista de fechas según recurrencia —
+        # — Generar fechas según recurrencia —
         fechas = []
         if recurrente:
             if freq == "Diaria":
@@ -462,8 +556,8 @@ if page == '▶ Registrar':
                     fechas.append(d)
                     d += dt.timedelta(days=1)
             else:  # Semanal
-                weekday_map = {n:i for i,n in enumerate(nombres)}
-                sel_nums = [weekday_map[d] for d in dias_sem]
+                weekday_map = {n: i for i, n in enumerate(nombres)}
+                sel_nums    = [weekday_map[d] for d in dias_sem]
                 d = fecha
                 while d <= fecha_fin:
                     if d.weekday() in sel_nums:
@@ -471,8 +565,6 @@ if page == '▶ Registrar':
                     d += dt.timedelta(days=1)
         else:
             fechas = [fecha]
-
-        # — Detectar choques (opcional: podrías comprobar cada fecha) —
 
         # — Construir DataFrame de nuevas reservas —
         rows = []
@@ -488,10 +580,11 @@ if page == '▶ Registrar':
             })
         new = pd.DataFrame(rows)
 
-        # — Guardar todas las reservas de golpe —
+        # — Guardar y notificar —
         df = pd.concat([df, new], ignore_index=True)
         atomic_save(df)
         toast(f"✅ {len(new)} reservas creadas", "success")
+        # st.experimental_rerun()  <-- comentado si tu versión no lo soporta
  
 # ------------------------------------------------------------------
 # 9) Sección 📂 Base datos (solo admin)
@@ -502,87 +595,195 @@ elif page == '📂 Base datos' and role == 'admin':
         unsafe_allow_html=True
     )
 
-    import datetime
-    from datetime import date, datetime as dt_datetime
+    # 1) Recalcular opciones de select
+    PROFESORES, CURSOS, RECURSOS = recalc_lists(df)
 
-    # Función de parseo seguro: maneja date, datetime, pandas.Timestamp y cadenas
-    def safe_parse_date(val):
-        # Ya es un date puro
-        if isinstance(val, date) and not isinstance(val, dt_datetime):
-            return val
-        # Es un datetime de Python
-        if isinstance(val, dt_datetime):
-            return val.date()
-        # Es un pandas.Timestamp
-        if hasattr(val, "to_pydatetime"):
-            return val.to_pydatetime().date()
-        # Cualquier otro caso (string), recurro a parse_date
-        return parse_date(val)
+    # 2) Filtros dinámicos en un expander
+    with st.expander("🔍 Filtros", expanded=True):
+        c1, c2, c3, c4 = st.columns(4)
+        min_fecha = df["Fecha"].apply(parse_date).min()
+        max_fecha = df["Fecha"].apply(parse_date).max()
+        with c1:
+            fecha_min, fecha_max = st.date_input(
+                "Rango fechas",
+                value=[min_fecha, max_fecha],
+                format="DD/MM/YYYY"
+            )
+        with c2:
+            profesores_sel = st.multiselect(
+                "Profesores",
+                options=PROFESORES,
+                default=[],
+                placeholder="Todos"
+            )
+        with c3:
+            cursos_sel = st.multiselect(
+                "Cursos",
+                options=CURSOS,
+                default=[],
+                placeholder="Todos"
+            )
+        with c4:
+            recursos_sel = st.multiselect(
+                "Recursos",
+                options=RECURSOS,
+                default=[],
+                placeholder="Todos"
+            )
 
-    # 1) Prepara el DataFrame y aplica parseo seguro a la columna Fecha
-    editor = df.copy()
-    editor['Fecha']       = editor['Fecha'].apply(safe_parse_date)
+    # 3) Aplicar filtros (si la lista está vacía, ignoro ese criterio)
+    df_work = df.copy()
+    df_work["Fecha_dt"] = df_work["Fecha"].apply(parse_date)
+    mask_fecha = (
+        (df_work["Fecha_dt"] >= fecha_min) &
+        (df_work["Fecha_dt"] <= fecha_max)
+    )
+    mask_prof = df_work["Profesor"].isin(profesores_sel) if profesores_sel else True
+    mask_cur  = df_work["Curso"].isin(cursos_sel)         if cursos_sel    else True
+    mask_rec  = df_work["Recurso"].isin(recursos_sel)     if recursos_sel  else True
+
+    df_filt = df_work[mask_fecha & mask_prof & mask_cur & mask_rec].drop(columns="Fecha_dt")
+    total, filtrados = len(df), len(df_filt)
+    st.markdown(f"Mostrando **{filtrados}** de **{total}** registros")
+    if filtrados == 0:
+        st.warning("No hay registros que cumplan esos criterios.")
+
+    # 4) Preparar editor: parseo de fechas/horas
+    editor = df_filt.copy()
+    editor['Fecha']       = editor['Fecha'].apply(parse_date)
     editor['Hora inicio'] = editor['Hora inicio'].apply(as_time)
     editor['Hora fin']    = editor['Hora fin'].apply(as_time)
 
-    # 2) Configuración de columnas para el data_editor
+    # 5) Column config con pickers y selectboxes
     cfg = {
         'Fecha':         st.column_config.DateColumn('Fecha', format='DD/MM/YYYY'),
         'Hora inicio':   st.column_config.TimeColumn('Hora inicio', format='HH:mm'),
         'Hora fin':      st.column_config.TimeColumn('Hora fin', format='HH:mm'),
         'Profesor':      st.column_config.SelectboxColumn('Profesor', options=PROFESORES),
-        'Curso':         st.column_config.SelectboxColumn('Curso', options=CURSOS),
-        'Recurso':       st.column_config.SelectboxColumn('Recurso', options=RECURSOS),
+        'Curso':         st.column_config.SelectboxColumn('Curso',    options=CURSOS),
+        'Recurso':       st.column_config.SelectboxColumn('Recurso',   options=RECURSOS),
         'Observaciones': st.column_config.TextColumn('Observaciones'),
     }
 
-    # 3) Muestra el editor de datos
     edited = st.data_editor(
         editor,
-        hide_index=False,
+        hide_index=False,               # mantenemos índice original para merge
         use_container_width=True,
         column_config=cfg,
-        height=450
+        height=400
     )
 
     st.markdown("---")
 
-    # 4) Botones de acción: Guardar cambios y Eliminar registros
-    action_col1, action_col2 = st.columns(2, gap="large")
-    with action_col1:
+    # 6) Detección de solapamientos por recurso/horario
+    def detect_conflicts(df_check: pd.DataFrame) -> list[tuple]:
+        conflicts = []
+        for res in RECURSOS:
+            grp = df_check[df_check['Recurso'] == res]
+            for fecha, g in grp.groupby('Fecha'):
+                slots = sorted(
+                    [(r['Hora inicio'], r['Hora fin'], idx) for idx, r in g.iterrows()],
+                    key=lambda x: x[0]
+                )
+                for (h1, h2, i1), (h3, h4, i2) in zip(slots, slots[1:]):
+                    if overlap(h1, h2, h3, h4):
+                        conflicts.append((res, fecha, i1, i2))
+        return conflicts
+
+    # 7) Detección de conflictos con mantenimientos
+    mant_df = pd.read_excel(EXCEL, sheet_name='Mantenimientos').fillna('')
+    if not mant_df.empty:
+        mant_df['FechaInicio_dt'] = mant_df['FechaInicio'].apply(parse_date)
+        mant_df['FechaFin_dt']    = mant_df['FechaFin'].apply(parse_date)
+        mant_df['HoraInicio_t']   = mant_df['HoraInicio'].apply(as_time)
+        mant_df['HoraFin_t']      = mant_df['HoraFin'].apply(as_time)
+
+    def detect_maintenance_conflicts(df_check: pd.DataFrame) -> list[tuple]:
+        m_conflicts = []
+        for idx, r in df_check.iterrows():
+            res = r['Recurso']
+            fecha = r['Fecha']
+            hi_r, hf_r = r['Hora inicio'], r['Hora fin']
+            for _, m in mant_df[mant_df['Recurso'] == res].iterrows():
+                if m['FechaInicio_dt'] <= fecha <= m['FechaFin_dt']:
+                    if overlap(hi_r, hf_r, m['HoraInicio_t'], m['HoraFin_t']):
+                        m_conflicts.append((idx, res, fecha))
+        return m_conflicts
+
+    # 8) Botones Guardar / Eliminar con validación
+    c1, c2 = st.columns(2, gap="large")
+    with c1:
         if st.button('💾 Guardar cambios', key='save_db_edits', use_container_width=True):
-            atomic_save(edited)
-            toast('✅ Cambios guardados.', 'success')
-    with action_col2:
+            # Merge de cambios en df original
+            df_updated = df.copy()
+            for idx, row in edited.iterrows():
+                df_updated.loc[idx] = row
+
+            confs      = detect_conflicts(df_updated)
+            mast_confs = detect_maintenance_conflicts(df_updated)
+
+            if confs or mast_confs:
+                for idx, res, fecha in mast_confs:
+                    toast(
+                        f"⚠️ El recurso {res} está en mantenimiento el {fecha.strftime(DATE_FMT)}.",
+                        "error"
+                    )
+                for res, fecha, i1, i2 in confs:
+                    toast(
+                        f"⚠️ Conflicto en {res} el {fecha.strftime(DATE_FMT)} "
+                        f"entre registros {i1} y {i2}.",
+                        "error"
+                    )
+                st.error("Corrige los conflictos antes de guardar.")
+            else:
+                atomic_save(df_updated)
+                toast('✅ Cambios guardados.', 'success')
+                try:
+                    st.experimental_rerun()
+                except AttributeError:
+                    import time
+                    st.query_params = {"_refresh": int(time.time())}
+
+    with c2:
         to_drop = st.multiselect(
             'Seleccionar registros a eliminar',
             options=edited.index,
             key='drop_db'
         )
         if to_drop and st.button('🗑️ Eliminar registros', key='delete_db', use_container_width=True):
-            new_df = edited.drop(index=to_drop).reset_index(drop=True)
-            atomic_save(new_df)
-            toast('✅ Registros eliminados.', 'success')
+            df_new     = df.copy().drop(index=to_drop).reset_index(drop=True)
+            confs      = detect_conflicts(df_new)
+            mast_confs = detect_maintenance_conflicts(df_new)
+            if confs or mast_confs:
+                st.error("Aún hay conflictos tras eliminar.")
+            else:
+                atomic_save(df_new)
+                toast('✅ Registros eliminados.', 'success')
+                try:
+                    st.experimental_rerun()
+                except AttributeError:
+                    import time
+                    st.query_params = {"_refresh": int(time.time())}
 
     st.markdown("---")
 
-    # 5) Exportaciones: Informe Excel y Calendario .ics
-    export_col1, export_col2 = st.columns(2, gap="large")
-    with export_col1:
+    # 9) Informe Excel + Calendario
+    col3, col4 = st.columns(2, gap="large")
+    with col3:
         rpt = build_report(df)
         st.download_button(
-            '📥 Informe Excel',
-            rpt,
+            label='📥 Informe Excel',
+            data=rpt,
             file_name='informe_reservas.xlsx',
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             use_container_width=True
         )
-    with export_col2:
+    with col4:
         prof_cal = st.selectbox('Seleccionar profesor (.ics)', PROFESORES, key='export_cal')
         ics_data = build_ics(df[df['Profesor'] == prof_cal], prof_cal)
         st.download_button(
-            '📅 Descargar calendario',
-            ics_data,
+            label='📅 Descargar calendario',
+            data=ics_data,
             file_name=f'{prof_cal}_reservas.ics',
             mime='text/calendar',
             use_container_width=True
@@ -596,62 +797,81 @@ elif page == '📅 Semana':
         "<h2 style='color:#000;font-size:1.5rem;text-align:center'>📅 Vista semanal</h2>",
         unsafe_allow_html=True
     )
-    # Selecciona cualquier fecha de la semana (cualquier día)
+
+    # 1) Selección de referencia de semana
     fecha_ref = st.date_input(
         "Selecciona fecha de la semana",
         dt.date.today(),
         format="DD/MM/YYYY",
         help="Elige un día dentro de la semana que quieres visualizar"
     )
-    # Calcular rango lunes-viernes
-    start = fecha_ref - dt.timedelta(days=fecha_ref.weekday())  # lunes
-    dias = [start + dt.timedelta(days=i) for i in range(5)]     # hasta viernes
-    # Encabezados en español
+
+    # 2) Cálculo de Lunes–Viernes
+    lunes  = fecha_ref - dt.timedelta(days=fecha_ref.weekday())
+    fechas = [lunes + dt.timedelta(days=i) for i in range(5)]
     nombres = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"]
-    cols = [f"{nombres[i]} {dias[i].strftime('%d/%m')}" for i in range(5)]
-    rows = [f"Bloque {i+1}" for i in range(len(BLOQUES))]
-    tabla = pd.DataFrame("", index=rows, columns=cols)
-    # Rellenar datos en tabla
-    for i, (hi, hf) in enumerate(BLOQUES):
-        for j, d in enumerate(dias):
+    cols = [f"{nombres[i]} {fechas[i].strftime(DATE_FMT)}" for i in range(5)]
+
+    # 3) Etiquetas de bloque (solo "Bloque 1", "Bloque 2", …)
+    bloque_labels = [f"Bloque {i+1}" for i in range(len(BLOQUES))]
+
+    # 4) Helper para mostrar “Nombre Apellido”
+    def short_name(full: str) -> str:
+        parts = full.split()
+        if len(parts) >= 3:
+            return f"{parts[0]} {parts[-2]}"
+        elif len(parts) == 2:
+            return f"{parts[0]} {parts[1]}"
+        return parts[0]
+
+    # 5) DataFrame vacío con índice = bloques, columnas = días
+    tabla = pd.DataFrame("", index=bloque_labels, columns=cols)
+
+    # 6) Rellenar cada celda con las reservas, ordenadas y con nombre corto
+    for bi, (hi, hf) in enumerate(BLOQUES):
+        for di, dia in enumerate(fechas):
             sel = df[
-                (df["Fecha"].apply(parse_date) == d)
-                & df.apply(
-                    lambda r: overlap(
-                        hi, hf,
-                        as_time(r["Hora inicio"]),
-                        as_time(r["Hora fin"])
-                    ),
-                    axis=1,
-                )
+                (df["Fecha"].apply(parse_date) == dia) &
+                (df["Hora inicio"].apply(as_time) == hi) &
+                (df["Hora fin"].apply(as_time) == hf)
             ]
             if not sel.empty:
-                lines = []
-                for _, row in sel.iterrows():
-                    lines.append(
-                        f"{row['Hora inicio']}-{row['Hora fin']} | "
-                        f"{row['Profesor']} | {row['Curso']} | "
-                        f"{row['Recurso']} | {row['Observaciones']}"
-                    )
-                tabla.iat[i, j] = "\n\n".join(lines)
-    # Aplicar estilo de colores
+                sel_sorted = sel.sort_values(
+                    by=["Hora inicio", "Profesor"],
+                    key=lambda col: col.apply(as_time) if col.name == "Hora inicio" else col
+                )
+                lines = sel_sorted.apply(
+                    lambda r: (
+                        f"{short_name(r['Profesor'])} | "
+                        f"{r['Curso']} | {r['Recurso']}"
+                    ),
+                    axis=1
+                ).tolist()
+                # Separar cada reserva con una línea en blanco extra
+                tabla.iat[bi, di] = "\n\n".join(lines)
+
+    # 7) Estilo con colores y pre-wrap
     import hashlib
     def get_color(text: str) -> str:
         h = hashlib.md5(text.encode("utf-8")).hexdigest()
         return f"#{h[:6]}"
+
     styled = (
         tabla.style
-        .set_properties(**{"white-space": "pre-wrap"})
-        .applymap(
-    lambda v: f"background-color: {get_color(v)}; color:#f4f4f4 !important;"
-    if isinstance(v, str) and v else ""
-)
-        .set_table_styles([
-            {"selector": "th", "props": [("min-width", "150px")]},
-            {"selector": "td", "props": [("min-width", "150px")]}  
-        ])
-        .set_table_attributes('style="table-layout:auto; width:100%;"')
+             .set_properties(**{"white-space": "pre-wrap"})
+             .applymap(
+                 lambda v: (
+                     f"background-color: {get_color(v)}; color:#f4f4f4 !important;"
+                     if v else ""
+                 )
+             )
+             .set_table_styles([
+                 {"selector": "th", "props": [("min-width", "150px")]},
+                 {"selector": "td", "props": [("min-width", "150px")]}
+             ])
+             .set_table_attributes('style="table-layout:auto; width:100%;"')
     )
+
     st.markdown(styled.to_html(), unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
@@ -662,9 +882,16 @@ elif page == '🔧 Mantenimiento' and role == 'admin':
         "<h2 style='color:#000;font-size:1.5rem;text-align:center'>🔧 Gestión de Mantenimiento</h2>",
         unsafe_allow_html=True
     )
+
+    # — Recalcular listas —
+    PROFESORES, CURSOS, RECURSOS = recalc_lists(df)
+
     def_tab = "Mantenimientos"
-    if def_tab in xl.sheet_names:
-        mant_df = xl.parse(def_tab).fillna("")
+    sheets   = pd.ExcelFile(EXCEL).sheet_names
+
+    # — Cargo la hoja de mantenimiento o creo un DataFrame vacío —
+    if def_tab in sheets:
+        mant_df = pd.read_excel(EXCEL, sheet_name=def_tab).fillna("")
     else:
         mant_df = pd.DataFrame(
             columns=["Recurso", "FechaInicio", "HoraInicio", "FechaFin", "HoraFin"]
@@ -673,39 +900,27 @@ elif page == '🔧 Mantenimiento' and role == 'admin':
     # --- Agregar nuevo mantenimiento ---
     st.subheader("Agregar nuevo mantenimiento")
     rsrc_maint = st.selectbox("Recurso", RECURSOS, key="maint_res")
-    d1, d2 = st.columns(2)
+    d1, d2     = st.columns(2)
     with d1:
-        start_date = st.date_input(
-            "Fecha inicio", dt.date.today(), key="mant_start_date"
-        )
+        start_date = st.date_input("Fecha inicio", dt.date.today(), key="mant_start_date")
     with d2:
-        end_date = st.date_input(
-            "Fecha fin", dt.date.today(), key="mant_end_date"
-        )
-    t1, t2 = st.columns(2)
+        end_date   = st.date_input("Fecha fin",   dt.date.today(), key="mant_end_date")
+    t1, t2     = st.columns(2)
     with t1:
-        start_time = st.time_input(
-            "Hora inicio", BLOQUES[0][0], key="mant_start_time"
-        )
+        start_time = st.time_input("Hora inicio", BLOQUES[0][0], key="mant_start_time")
     with t2:
-        end_time = st.time_input(
-            "Hora fin", BLOQUES[0][1], key="mant_end_time"
-        )
+        end_time   = st.time_input("Hora fin",    BLOQUES[0][1], key="mant_end_time")
 
-    if st.button(
-        "💾 Guardar mantenimiento", key="save_maint", use_container_width=True
-    ):
+    if st.button("💾 Guardar mantenimiento", key="save_maint", use_container_width=True):
         new_row = {
-            "Recurso": rsrc_maint,
+            "Recurso":     rsrc_maint,
             "FechaInicio": start_date,
-            "HoraInicio": start_time,
-            "FechaFin": end_date,
-            "HoraFin": end_time,
+            "HoraInicio":  start_time,
+            "FechaFin":    end_date,
+            "HoraFin":     end_time,
         }
         mant_df = pd.concat([mant_df, pd.DataFrame([new_row])], ignore_index=True)
-        with pd.ExcelWriter(
-            EXCEL, engine="openpyxl", mode="a", if_sheet_exists="replace"
-        ) as writer:
+        with pd.ExcelWriter(EXCEL, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
             mant_df.to_excel(writer, sheet_name=def_tab, index=False)
         st.success("✅ Mantenimiento registrado correctamente.")
 
@@ -715,18 +930,18 @@ elif page == '🔧 Mantenimiento' and role == 'admin':
     if "FechaInicio" in mant_editor.columns:
         mant_editor["FechaInicio"] = mant_editor["FechaInicio"].apply(parse_date)
     if "FechaFin" in mant_editor.columns:
-        mant_editor["FechaFin"] = mant_editor["FechaFin"].apply(parse_date)
+        mant_editor["FechaFin"]    = mant_editor["FechaFin"].apply(parse_date)
     if "HoraInicio" in mant_editor.columns:
-        mant_editor["HoraInicio"] = mant_editor["HoraInicio"].apply(as_time)
+        mant_editor["HoraInicio"]  = mant_editor["HoraInicio"].apply(as_time)
     if "HoraFin" in mant_editor.columns:
-        mant_editor["HoraFin"] = mant_editor["HoraFin"].apply(as_time)
+        mant_editor["HoraFin"]     = mant_editor["HoraFin"].apply(as_time)
 
     cfg_maint = {
-        "Recurso": st.column_config.SelectboxColumn("Recurso", options=RECURSOS),
-        "FechaInicio": st.column_config.DateColumn("Fecha inicio", format="DD/MM/YYYY"),
-        "HoraInicio": st.column_config.TimeColumn("Hora inicio", format="HH:mm"),
-        "FechaFin": st.column_config.DateColumn("Fecha fin", format="DD/MM/YYYY"),
-        "HoraFin": st.column_config.TimeColumn("Hora fin", format="HH:mm"),
+        "Recurso":      st.column_config.SelectboxColumn("Recurso", options=RECURSOS),
+        "FechaInicio":  st.column_config.DateColumn("Fecha inicio", format="DD/MM/YYYY"),
+        "HoraInicio":   st.column_config.TimeColumn("Hora inicio", format="HH:mm"),
+        "FechaFin":     st.column_config.DateColumn("Fecha fin", format="DD/MM/YYYY"),
+        "HoraFin":      st.column_config.TimeColumn("Hora fin", format="HH:mm"),
     }
     edited_maint = st.data_editor(
         mant_editor,
@@ -737,14 +952,8 @@ elif page == '🔧 Mantenimiento' and role == 'admin':
 
     c3, c4 = st.columns(2)
     with c3:
-        if st.button(
-            "💾 Guardar cambios mantenimiento",
-            key="save_maint_edits",
-            use_container_width=True,
-        ):
-            with pd.ExcelWriter(
-                EXCEL, engine="openpyxl", mode="a", if_sheet_exists="replace"
-            ) as writer:
+        if st.button("💾 Guardar cambios mantenimiento", key="save_maint_edits", use_container_width=True):
+            with pd.ExcelWriter(EXCEL, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
                 edited_maint.to_excel(writer, sheet_name=def_tab, index=False)
             st.success("✅ Cambios en mantenimiento guardados.")
     with c4:
@@ -753,19 +962,8 @@ elif page == '🔧 Mantenimiento' and role == 'admin':
             options=edited_maint.index,
             key="drop_maint",
         )
-        if (
-            st.button(
-                "🗑️ Eliminar mantenimiento",
-                key="delete_maint",
-                use_container_width=True,
-            )
-            and to_drop_maint
-        ):
+        if st.button("🗑️ Eliminar mantenimiento", key="delete_maint", use_container_width=True) and to_drop_maint:
             kept = edited_maint.drop(index=to_drop_maint).reset_index(drop=True)
-            with pd.ExcelWriter(
-                EXCEL, engine="openpyxl", mode="a", if_sheet_exists="replace"
-            ) as writer:
+            with pd.ExcelWriter(EXCEL, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
                 kept.to_excel(writer, sheet_name=def_tab, index=False)
             st.success("✅ Mantenimientos eliminados.")
-            
-           
